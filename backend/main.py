@@ -7,16 +7,31 @@ from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+# 加载 .env 文件中的环境变量
+from dotenv import load_dotenv
+env_path = Path(__file__).parent / '.env'
+load_dotenv(dotenv_path=env_path)
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from PIL import Image
 import httpx
-import os
+
+# 导入认证和数据库模块
+from auth import (
+    register_user, login_user, refresh_access_token,
+    get_current_user, User, TokenResponse, verify_token, decode_token
+)
+from database.db import init_database, execute_query, execute_insert
 
 app = FastAPI(title="zizi AI识字伴侣 API", docs_url="/docs", redoc_url="/redoc")
+
+# 初始化数据库
+@app.on_event("startup")
+async def startup_event():
+    init_database()
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,6 +40,131 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# 调试端点 - 用于测试连接
+@app.get("/api/debug")
+async def debug():
+    return {"status": "ok", "message": "Backend is running"}
+
+
+# ==================== 认证接口 ====================
+
+@app.post("/api/auth/register")
+async def api_register(request: Request):
+    """用户注册"""
+    try:
+        data = await request.json()
+        phone = data.get("phone")
+        password = data.get("password")
+
+        if not phone or not password:
+            raise HTTPException(status_code=400, detail="手机号和密码不能为空")
+
+        result = register_user(phone, password)
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/auth/login")
+async def api_login(request: Request):
+    """用户登录"""
+    try:
+        data = await request.json()
+        phone = data.get("phone")
+        password = data.get("password")
+
+        if not phone or not password:
+            raise HTTPException(status_code=400, detail="手机号和密码不能为空")
+
+        result = login_user(phone, password)
+        if "error" in result:
+            raise HTTPException(status_code=401, detail=result["error"])
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/auth/refresh", response_model=TokenResponse)
+async def api_refresh(request: Request):
+    """刷新Token"""
+    try:
+        data = await request.json()
+        refresh_token = data.get("refresh_token")
+
+        if not refresh_token:
+            raise HTTPException(status_code=400, detail="刷新令牌不能为空")
+
+        result = refresh_access_token(refresh_token)
+        if "error" in result:
+            raise HTTPException(status_code=401, detail=result["error"])
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/auth/logout")
+async def api_logout(current_user: User = Depends(get_current_user)):
+    """用户登出"""
+    # 客户端删除token即可，服务端无状态
+    return {"success": True, "message": "已登出"}
+
+
+@app.get("/api/user/profile")
+async def api_get_profile(current_user: User = Depends(get_current_user)):
+    """获取用户信息"""
+    if not current_user:
+        raise HTTPException(status_code=401, detail="未登录")
+    # current_user 是字典，不是对象
+    return {
+        "id": current_user.get("user_id"),
+        "phone": current_user.get("phone"),
+        "nickname": None,
+        "created_at": None,
+        "last_login_at": None
+    }
+
+
+@app.get("/api/user/stats")
+async def api_get_stats(current_user: User = Depends(get_current_user)):
+    """获取用户学习统计"""
+    # 查询学习记录统计
+    stats = execute_query(
+        """SELECT
+            COUNT(DISTINCT char) as total_chars,
+            COUNT(*) as total_records,
+            SUM(duration_sec) as total_duration
+        FROM learning_records
+        WHERE user_id = ?""",
+        (current_user.id,),
+        fetch_one=True
+    )
+
+    # 查询最近学习的字
+    recent_chars = execute_query(
+        """SELECT char, MAX(created_at) as last_time
+        FROM learning_records
+        WHERE user_id = ?
+        GROUP BY char
+        ORDER BY last_time DESC
+        LIMIT 10""",
+        (current_user.id,)
+    )
+
+    return {
+        "stats": stats or {"total_chars": 0, "total_records": 0, "total_duration": 0},
+        "recent_chars": recent_chars
+    }
+
+
+# ==================== 原有功能 ====================
 
 CHARACTERS = [
     "日",
@@ -1763,15 +1903,22 @@ async def process_image(
     file: UploadFile = File(...),
     word_library: str = Form("infant"),
     voice_id: str = Form("serena"),
+    authorization: str = Form(None),  # 可选的登录token
 ):
     """Process uploaded image and return character + story with pre-generated TTS"""
     try:
         image_data = await file.read()
+        print(f"Received image: filename={file.filename}, size={len(image_data)}")
+
+        if not image_data or len(image_data) == 0:
+            raise HTTPException(status_code=400, detail="图片为空")
 
         if len(image_data) > 10 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="图片太大了")
 
+        print(f"word_library={word_library}, voice_id={voice_id}")
         api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("OPENAI_API_KEY")
+        print(f"API key loaded: {bool(api_key)}")
 
         library = WORD_LIBRARIES.get(word_library, WORD_LIBRARIES["infant"])
         library_words = library.get("words", WORD_LIBRARIES["infant"]["words"])
@@ -1812,11 +1959,68 @@ async def process_image(
         else:
             result = get_mock_result(image_data, library_words)
 
+        # 如果用户已登录，记录学习记录
+        user = None
+        if authorization and authorization.startswith("Bearer "):
+            token = authorization[7:]  # 去掉 "Bearer "
+            user = verify_token(token)
+
+        if user:
+            char = result.get("target_char", "")
+            # 记录拍照学习行为
+            from database.db import execute_insert
+            execute_insert(
+                """INSERT INTO learning_records
+                   (user_id, char, library_id, action_type, context)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    user["id"],
+                    char,
+                    word_library,
+                    "photo_capture",
+                    json.dumps({
+                        "story_text": result.get("story_text", ""),
+                        "voice_id": voice_id,
+                        "source": "camera"
+                    })
+                )
+            )
+            # 更新或创建汉字掌握度记录
+            existing = execute_query(
+                "SELECT id, view_count FROM char_mastery WHERE user_id = ? AND char = ?",
+                (user["id"], char),
+                fetch_one=True
+            )
+            if existing:
+                execute_update(
+                    """UPDATE char_mastery
+                       SET view_count = view_count + 1, updated_at = CURRENT_TIMESTAMP
+                       WHERE id = ?""",
+                    (existing["id"],)
+                )
+            else:
+                execute_insert(
+                    """INSERT INTO char_mastery (user_id, char, view_count, mastery_level)
+                       VALUES (?, ?, 1, 0)""",
+                    (user["id"], char)
+                )
+
         return JSONResponse(content=result)
 
     except Exception as e:
+        import traceback
+        error_detail = str(e)
         print(f"Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(traceback.format_exc())
+        # Return more detailed error for debugging
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "server_error",
+                "message": error_detail,
+                "detail": traceback.format_exc()
+            }
+        )
 
 
 @app.get("/api/word-libraries")
@@ -2295,5 +2499,8 @@ async def tts_preview(voice_id: str = Form(...)):
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+# ============================================
+# 用户认证相关接口 (V1.1)

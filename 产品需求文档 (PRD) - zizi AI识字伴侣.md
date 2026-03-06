@@ -254,37 +254,28 @@
 
 ## 9. 版本规划
 
-### 9.1 V1.0 - 当前版本
+### 9.1 V1.0 - 基础功能
 - ✅ 核心拍照识字功能
 - ✅ 4级字库系统（100-1500字）
 - ✅ 5种音色选择
 - ✅ 基础设置管理
-- ❌ 无用户体系
 
-### 9.2 V2.0 - 用户体系（规划中）
-**目标**：建立用户体系，为后续功能扩展奠定基础
+### 9.2 V1.1 - 用户体系（当前版本）
+**已实现**：
+- ✅ 手机号+密码注册/登录
+- ✅ JWT Token自动登录
+- ✅ 游客模式保留
+- ✅ 学习记录云端同步
+- ✅ 汉字掌握度追踪
 
-**核心功能**：
-- 家长账户系统（手机号注册/登录）
-- 儿童档案管理（支持多子女家庭）
-- 学习记录云端同步
-- 学习进度追踪
-- 隐私合规（COPPA/GDPR-K）
-
-**技术架构调整**：
-- 引入MySQL数据库
-- 引入Redis缓存
-- 增加认证服务
-- 文件存储迁移至OSS
-
-### 9.3 V2.5 - 绘本AI讲解（规划中）
-**目标**：拓展学习内容形式
+### 9.3 V2.0 - 学习数据与绘本（规划中）
+**目标**：增加学习数据可视化和绘本功能
 
 **核心功能**：
-- 绘本扫描与OCR识别
-- AI生成绘本讲解
+- 学习报告页面
+- 汉字掌握度可视化
+- 拍绘本AI讲解
 - 绘本内容库
-- 阅读进度追踪
 
 ### 9.4 V3.0 - 个性化识字游戏（规划中）
 **目标**：增加游戏化学习体验
@@ -305,12 +296,54 @@
 | V0.1 | - | 初始需求文档 |
 | V0.2 | - | 修订需求，明确Demo范围 |
 | V1.0 | 2026-03-04 | 更新为当前实现状态，增加字库系统、音色系统、设置页 |
+| V1.1 | 2026-03-04 | 增加基础用户体系：手机号+密码注册登录，自动保存登录状态，学习记录云端同步 |
 | V2.0-DRAFT | 2026-03-04 | 增加用户体系规划、绘本功能规划、游戏功能规划 |
 | V1.1 | 2026-03-04 | **简化版用户体系**：手机号+密码注册登录，自动保存登录状态，保留游客模式 |
 
+### 10.4 数据表设计
+
+```sql
+-- 用户表
+users
+├── id: INTEGER PRIMARY KEY
+├── phone: VARCHAR(20) UNIQUE -- 手机号
+├── password_hash: VARCHAR(255) -- bcrypt哈希
+├── nickname: VARCHAR(50) -- 昵称（可选）
+├── created_at: TIMESTAMP
+└── last_login_at: TIMESTAMP
+
+-- 学习记录表
+learning_records
+├── id: INTEGER PRIMARY KEY
+├── user_id: INTEGER FOREIGN KEY
+├── char: VARCHAR(10) -- 学习的汉字
+├── library_id: VARCHAR(50) -- 字库ID
+├── action_type: VARCHAR(50) -- 行为类型
+├── context: TEXT -- JSON格式上下文
+├── duration_sec: INTEGER
+└── created_at: TIMESTAMP
+
+-- 汉字掌握度表
+char_mastery
+├── id: INTEGER PRIMARY KEY
+├── user_id: INTEGER FOREIGN KEY
+├── char: VARCHAR(10)
+├── mastery_level: INTEGER DEFAULT 0
+├── view_count: INTEGER DEFAULT 0
+└── updated_at: TIMESTAMP
+
+-- 用户设置表
+user_settings
+├── id: INTEGER PRIMARY KEY
+├── user_id: INTEGER UNIQUE FOREIGN KEY
+├── preferred_voice: VARCHAR(50)
+├── current_library: VARCHAR(50)
+└── settings_json: TEXT
+```
+
 ---
 
-## 10. 附录
+## 11. 附录
 
 ### 10.1 环境变量
 

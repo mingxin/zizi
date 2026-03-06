@@ -2,9 +2,10 @@
 
 import { useState, useRef, useEffect } from "react";
 import Image from "next/image";
+import AuthPage from "@/components/AuthPage";
 
-type PageState = "home" | "processing" | "result" | "settings";
-type SettingsTab = "voice" | "library";
+type PageState = "auth" | "home" | "processing" | "result" | "settings";
+type SettingsTab = "voice" | "library" | "account";
 
 interface Voice {
   id: string;
@@ -30,10 +31,22 @@ interface ResultData {
   charAudioUrl?: string;
 }
 
+interface User {
+  id: number;
+  phone: string;
+  nickname?: string;
+}
+
 export default function Home() {
   const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-  
-  const [page, setPage] = useState<PageState>("home");
+
+  // 认证状态
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+  const [token, setToken] = useState<string | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+
+  // 页面状态
+  const [page, setPage] = useState<PageState>("auth");
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
   const [resultData, setResultData] = useState<ResultData | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -45,6 +58,84 @@ export default function Home() {
   const [selectedLibrary, setSelectedLibrary] = useState<string>("infant");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+
+  // 检查自动登录
+  useEffect(() => {
+    const checkAuth = async () => {
+      const savedToken = localStorage.getItem("zizi_token");
+      const savedUser = localStorage.getItem("zizi_user");
+
+      if (savedToken && savedUser) {
+        try {
+          const response = await fetch(`${API_BASE}/api/user/profile`, {
+            headers: { Authorization: `Bearer ${savedToken}` },
+          });
+
+          if (response.ok) {
+            setToken(savedToken);
+            setUser(JSON.parse(savedUser));
+            setIsAuthenticated(true);
+            setPage("home");
+          } else {
+            const refreshToken = localStorage.getItem("zizi_refresh_token");
+            if (refreshToken) {
+              const refreshResponse = await fetch(`${API_BASE}/api/auth/refresh`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ refresh_token: refreshToken }),
+              });
+
+              if (refreshResponse.ok) {
+                const data = await refreshResponse.json();
+                localStorage.setItem("zizi_token", data.access_token);
+                setToken(data.access_token);
+                setUser(JSON.parse(savedUser));
+                setIsAuthenticated(true);
+                setPage("home");
+              } else {
+                clearAuth();
+              }
+            } else {
+              clearAuth();
+            }
+          }
+        } catch (e) {
+          console.error("Auth check failed:", e);
+          clearAuth();
+        }
+      } else {
+        setIsAuthenticated(false);
+      }
+    };
+
+    checkAuth();
+  }, [API_BASE]);
+
+  const clearAuth = () => {
+    localStorage.removeItem("zizi_token");
+    localStorage.removeItem("zizi_refresh_token");
+    localStorage.removeItem("zizi_user");
+    setToken(null);
+    setUser(null);
+    setIsAuthenticated(false);
+  };
+
+  const handleLogin = (newToken: string, newUser: User) => {
+    setToken(newToken);
+    setUser(newUser);
+    setIsAuthenticated(true);
+    setPage("home");
+  };
+
+  const handleGuest = () => {
+    setIsAuthenticated(false);
+    setPage("home");
+  };
+
+  const handleLogout = () => {
+    clearAuth();
+    setPage("auth");
+  };
 
   useEffect(() => {
     return () => {
@@ -74,7 +165,6 @@ export default function Home() {
         const res = await fetch(`${API_BASE}/api/voices?t=${Date.now()}`);
         const data = await res.json();
         setVoices(data.voices || []);
-        console.log("Fetched voices:", data.voices);
       } catch (e) {
         console.error("Failed to fetch voices:", e);
         setVoices([
@@ -91,7 +181,6 @@ export default function Home() {
         const res = await fetch(`${API_BASE}/api/word-libraries?t=${Date.now()}`);
         const data = await res.json();
         setWordLibraries(data.libraries || []);
-        console.log("Fetched libraries:", data.libraries);
       } catch (e) {
         console.error("Failed to fetch word libraries:", e);
         setWordLibraries([
@@ -115,8 +204,6 @@ export default function Home() {
     }
   }, [page]);
 
-
-
   const handleCapture = () => {
     fileInputRef.current?.click();
   };
@@ -137,6 +224,9 @@ export default function Home() {
         formData.append("file", file);
         formData.append("word_library", selectedLibrary);
         formData.append("voice_id", selectedVoice);
+        if (token) {
+          formData.append("authorization", `Bearer ${token}`);
+        }
 
         const response = await fetch(`${API_BASE}/api/process`, {
           method: "POST",
@@ -182,7 +272,7 @@ export default function Home() {
     }
 
     const textToSpeak = resultData?.story || "";
-    
+
     if (resultData?.audioUrl) {
       setIsSpeaking(true);
       if (audioRef.current) {
@@ -193,45 +283,35 @@ export default function Home() {
       }
       return;
     }
-    
+
     if (selectedVoice === "browser" || !textToSpeak) {
-      if (resultData?.audioUrl) {
-        setIsSpeaking(true);
-        if (audioRef.current) {
-          audioRef.current.src = resultData.audioUrl;
-          audioRef.current.currentTime = 0;
-          audioRef.current.play();
-          audioRef.current.onended = () => setIsSpeaking(false);
-        }
+      setIsSpeaking(true);
+      if ("speechSynthesis" in window) {
+        speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(resultData?.story || "");
+        utterance.rate = 0.8;
+        utterance.pitch = 1.2;
+        utterance.onend = () => setIsSpeaking(false);
+        speechSynthesis.speak(utterance);
       } else {
-        setIsSpeaking(true);
-        if ("speechSynthesis" in window) {
-          speechSynthesis.cancel();
-          const utterance = new SpeechSynthesisUtterance(resultData?.story || "");
-          utterance.rate = 0.8;
-          utterance.pitch = 1.2;
-          utterance.onend = () => setIsSpeaking(false);
-          speechSynthesis.speak(utterance);
-        } else {
-          setIsSpeaking(false);
-        }
+        setIsSpeaking(false);
       }
       return;
     }
-    
+
     try {
       setIsSpeaking(true);
       const formData = new FormData();
       formData.append("text", textToSpeak);
       formData.append("voice_id", selectedVoice);
-      
+
       const ttsResponse = await fetch(`${API_BASE}/api/tts`, {
         method: "POST",
         body: formData,
       });
-      
+
       const ttsData = await ttsResponse.json();
-      
+
       if (!ttsData.use_browser && ttsData.audio_url) {
         if (audioRef.current) {
           audioRef.current.src = ttsData.audio_url;
@@ -240,11 +320,10 @@ export default function Home() {
           audioRef.current.onended = () => setIsSpeaking(false);
         }
       } else {
-        const voiceConfig = ttsData.config || {};
         if ("speechSynthesis" in window) {
           speechSynthesis.cancel();
           const utterance = new SpeechSynthesisUtterance(textToSpeak);
-          utterance.rate = voiceConfig.speed || 0.8;
+          utterance.rate = 0.8;
           utterance.pitch = 1.2;
           utterance.onend = () => setIsSpeaking(false);
           speechSynthesis.speak(utterance);
@@ -294,6 +373,29 @@ export default function Home() {
     }
   };
 
+  // 认证页面
+  if (page === "auth" && isAuthenticated === false) {
+    return (
+      <AuthPage
+        onLogin={handleLogin}
+        onGuest={handleGuest}
+        apiBase={API_BASE}
+      />
+    );
+  }
+
+  // 加载中
+  if (isAuthenticated === null) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-12 h-12 border-4 border-[var(--zizi-secondary)] border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-gray-500">加载中...</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen flex flex-col items-center justify-center p-4 relative overflow-hidden">
       <input
@@ -304,6 +406,16 @@ export default function Home() {
         className="hidden"
         onChange={handleFileChange}
       />
+
+      {/* 登录状态指示器 */}
+      {isAuthenticated && user && (
+        <div className="absolute top-4 left-4 flex items-center gap-2 px-3 py-1.5 bg-white rounded-full shadow-md">
+          <div className="w-6 h-6 rounded-full bg-gradient-to-br from-[var(--zizi-primary)] to-[var(--zizi-secondary)] flex items-center justify-center text-white text-xs font-bold">
+            {user.phone.slice(-2)}
+          </div>
+          <span className="text-sm text-gray-600">已登录</span>
+        </div>
+      )}
 
       {page === "home" && (
         <HomePage
@@ -329,6 +441,10 @@ export default function Home() {
             setSelectedLibrary(libraryId);
             localStorage.setItem("zizi_library", libraryId);
           }}
+          isAuthenticated={isAuthenticated || false}
+          user={user}
+          onLogout={handleLogout}
+          onLoginClick={() => setPage("auth")}
         />
       )}
 
@@ -546,6 +662,21 @@ function ResultPage({
   );
 }
 
+interface SettingsPageProps {
+  voices: Voice[];
+  selectedVoice: string;
+  onSelectVoice: (voiceId: string) => void;
+  onBack: () => void;
+  apiBase: string;
+  wordLibraries: WordLibrary[];
+  selectedLibrary: string;
+  onSelectLibrary: (libraryId: string) => void;
+  isAuthenticated: boolean;
+  user: User | null;
+  onLogout: () => void;
+  onLoginClick: () => void;
+}
+
 function SettingsPage({
   voices,
   selectedVoice,
@@ -555,16 +686,11 @@ function SettingsPage({
   wordLibraries,
   selectedLibrary,
   onSelectLibrary,
-}: {
-  voices: Voice[];
-  selectedVoice: string;
-  onSelectVoice: (voiceId: string) => void;
-  onBack: () => void;
-  apiBase: string;
-  wordLibraries: WordLibrary[];
-  selectedLibrary: string;
-  onSelectLibrary: (libraryId: string) => void;
-}) {
+  isAuthenticated,
+  user,
+  onLogout,
+  onLoginClick,
+}: SettingsPageProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("voice");
   const [playingPreview, setPlayingPreview] = useState<string | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement>(null);
@@ -580,7 +706,7 @@ function SettingsPage({
     }
 
     onSelectVoice(voiceId);
-    
+
     if (voiceId === "browser") {
       if ("speechSynthesis" in window) {
         speechSynthesis.cancel();
@@ -595,7 +721,6 @@ function SettingsPage({
     }
 
     try {
-      // Stop any currently playing audio
       if (previewAudioRef.current) {
         previewAudioRef.current.pause();
         previewAudioRef.current.src = "";
@@ -603,36 +728,26 @@ function SettingsPage({
       if ("speechSynthesis" in window) {
         speechSynthesis.cancel();
       }
-      
+
       setPlayingPreview(voiceId);
-      console.log("Fetching preview for voice:", voiceId);
-      
+
       const formData = new FormData();
       formData.append("voice_id", voiceId);
-      
+
       const response = await fetch(`${apiBase}/api/tts/preview?t=${Date.now()}`, {
         method: "POST",
         body: formData,
       });
-      
+
       const data = await response.json();
-      console.log("Preview response:", data);
-      
+
       if (data.audio_url) {
-        // Create completely new audio element to force fresh playback
         const newAudio = new Audio();
         newAudio.src = data.audio_url;
-        console.log("Playing audio:", data.audio_url);
-        
         newAudio.onended = () => setPlayingPreview(null);
         newAudio.onerror = () => setPlayingPreview(null);
-        
-        // Update the ref and play
         previewAudioRef.current = newAudio;
-        newAudio.play().catch(e => {
-          console.error("Play error:", e);
-          setPlayingPreview(null);
-        });
+        newAudio.play().catch(() => setPlayingPreview(null));
       } else if (data.use_browser) {
         if ("speechSynthesis" in window) {
           speechSynthesis.cancel();
@@ -652,7 +767,7 @@ function SettingsPage({
   return (
     <div className="flex flex-col items-center gap-6 w-full max-w-md">
       <audio ref={previewAudioRef} />
-      
+
       <button
         onClick={onBack}
         className="absolute top-4 left-4 p-3 rounded-full bg-white shadow-lg"
@@ -672,13 +787,19 @@ function SettingsPage({
           onClick={() => setActiveTab("voice")}
           className={`flex-1 py-2 px-4 rounded-full transition-all ${activeTab === "voice" ? "bg-[var(--zizi-primary)] text-white" : "text-[var(--zizi-dark)]"}`}
         >
-          音色选择
+          音色
         </button>
         <button
           onClick={() => setActiveTab("library")}
           className={`flex-1 py-2 px-4 rounded-full transition-all ${activeTab === "library" ? "bg-[var(--zizi-primary)] text-white" : "text-[var(--zizi-dark)]"}`}
         >
-          字库选择
+          字库
+        </button>
+        <button
+          onClick={() => setActiveTab("account")}
+          className={`flex-1 py-2 px-4 rounded-full transition-all ${activeTab === "account" ? "bg-[var(--zizi-primary)] text-white" : "text-[var(--zizi-dark)]"}`}
+        >
+          账户
         </button>
       </div>
 
@@ -736,6 +857,86 @@ function SettingsPage({
               )}
             </button>
           ))}
+        </div>
+      )}
+
+      {activeTab === "account" && (
+        <div className="w-full flex flex-col gap-4">
+          {isAuthenticated && user ? (
+            <>
+              <div className="bg-white rounded-2xl p-6 shadow-md">
+                <div className="flex items-center gap-4 mb-4">
+                  <div className="w-16 h-16 rounded-full bg-gradient-to-br from-[var(--zizi-primary)] to-[var(--zizi-secondary)] flex items-center justify-center text-white text-2xl font-bold">
+                    {user.phone.slice(-2)}
+                  </div>
+                  <div>
+                    <p className="font-bold text-lg" style={{ color: "var(--zizi-dark)" }}>
+                      已登录
+                    </p>
+                    <p className="text-sm text-gray-500">
+                      {user.phone.slice(0, 3)}****{user.phone.slice(-4)}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-white rounded-2xl p-4 shadow-md">
+                <p className="text-sm text-gray-600 mb-2">账户功能</p>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between py-2">
+                    <span className="text-sm">学习进度同步</span>
+                    <span className="text-sm text-green-500">已开启</span>
+                  </div>
+                  <div className="flex items-center justify-between py-2">
+                    <span className="text-sm">跨设备使用</span>
+                    <span className="text-sm text-green-500">已开启</span>
+                  </div>
+                </div>
+              </div>
+
+              <button
+                onClick={onLogout}
+                className="w-full py-4 rounded-xl font-bold text-white transition-all"
+                style={{
+                  background: "linear-gradient(135deg, #ff6b6b 0%, #ff8e8e 100%)",
+                }}
+              >
+                退出登录
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="bg-white rounded-2xl p-6 shadow-md text-center">
+                <div className="w-16 h-16 rounded-full bg-gray-200 flex items-center justify-center mx-auto mb-4">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                  </svg>
+                </div>
+                <p className="font-bold text-lg mb-2" style={{ color: "var(--zizi-dark)" }}>
+                  当前为游客模式
+                </p>
+                <p className="text-sm text-gray-500 mb-4">
+                  登录后可以同步学习记录，换设备不丢失进度
+                </p>
+                <button
+                  onClick={onLoginClick}
+                  className="w-full py-3 rounded-xl font-bold text-white transition-all"
+                  style={{
+                    background: "linear-gradient(135deg, var(--zizi-secondary) 0%, #6EE7DE 100%)",
+                  }}
+                >
+                  立即登录
+                </button>
+              </div>
+
+              <div className="bg-yellow-50 rounded-2xl p-4 border border-yellow-200">
+                <p className="text-sm text-yellow-700">
+                  <span className="font-bold">提示：</span>
+                  游客模式下的学习记录仅保存在当前设备，清除浏览器数据会丢失。
+                </p>
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>
